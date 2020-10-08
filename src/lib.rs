@@ -291,7 +291,8 @@ use openssl::hash::{hash, MessageDigest};
 use openssl::pkey::PKey;
 use openssl::x509::{X509, X509Req};
 
-use reqwest::{Client, StatusCode};
+use reqwest::StatusCode;
+use reqwest::blocking::Client;
 
 use helper::{gen_key, b64, read_pkey, gen_csr};
 use error::{Result, ErrorKind};
@@ -399,8 +400,7 @@ impl Directory {
     /// # fn main () { try_main().unwrap(); }
     /// ```
     pub fn from_url(url: &str) -> Result<Directory> {
-        let client = Client::new()?;
-        let mut res = client.get(url).send()?;
+        let mut res = reqwest::blocking::get(url)?;
         let mut content = String::new();
         res.read_to_string(&mut content)?;
         Ok(Directory {
@@ -450,12 +450,12 @@ impl Directory {
     /// it will try to get nonce header from directory url.
     fn get_nonce(&self) -> Result<String> {
         let url = self.url_for("new-nonce").unwrap_or(&self.url);
-        let client = Client::new()?;
-        let res = client.get(url).send()?;
+        let res = reqwest::blocking::get(url)?;
         res.headers()
-            .get::<hyperx::ReplayNonce>()
-            .ok_or("Replay-Nonce header not found".into())
-            .and_then(|nonce| Ok(nonce.as_str().to_string()))
+            .get("Replay-Nonce")
+            .ok_or(ErrorKind::Msg("Replay-Nonce header not found".into()).into())
+            .and_then(|nonce| nonce.to_str().map_err(|_| ErrorKind::Msg("Nonce header value contains invalid characters".into()).into()))
+            .map(|nonce| nonce.to_string())
     }
 
     /// Makes a new post request to directory, signs payload with pkey.
@@ -474,11 +474,11 @@ impl Directory {
             .and_then(|obj| obj.insert("resource".to_owned(), resource_json));
 
         let jws = self.jws(pkey, json)?;
-        let client = Client::new()?;
+        let client = reqwest::blocking::Client::new();
         let mut res = client
             .post(self.url_for(resource)
                       .ok_or(format!("URL for resource: {} not found", resource))?)
-            .body(&jws[..])
+            .body(jws)
             .send()?;
 
         let res_json = {
@@ -491,7 +491,7 @@ impl Directory {
             }
         };
 
-        Ok((*res.status(), res_json))
+        Ok((res.status(), res_json))
     }
 
     /// Makes a Flattened JSON Web Signature from payload
@@ -557,7 +557,7 @@ impl Account {
         });
         let (status, resp) = self.directory().request(self.pkey(), "new-authz", map)?;
 
-        if status != StatusCode::Created {
+        if status != StatusCode::CREATED {
             return Err(ErrorKind::AcmeServerError(resp).into());
         }
 
@@ -646,8 +646,8 @@ impl Account {
         };
 
         match status {
-            StatusCode::Ok => info!("Certificate successfully revoked"),
-            StatusCode::Conflict => warn!("Certificate already revoked"),
+            StatusCode::OK => info!("Certificate successfully revoked"),
+            StatusCode::CONFLICT => warn!("Certificate already revoked"),
             _ => return Err(ErrorKind::AcmeServerError(resp).into()),
         }
 
@@ -733,8 +733,8 @@ impl AccountRegistration {
         let (status, resp) = self.directory.request(&pkey, "new-reg", map)?;
 
         match status {
-            StatusCode::Created => debug!("User successfully registered"),
-            StatusCode::Conflict => debug!("User already registered"),
+            StatusCode::CREATED => debug!("User successfully registered"),
+            StatusCode::CONFLICT => debug!("User already registered"),
             _ => return Err(ErrorKind::AcmeServerError(resp).into()),
         };
 
@@ -793,17 +793,17 @@ impl<'a> CertificateSigner<'a> {
         map.insert("resource".to_owned(), "new-cert".to_owned());
         map.insert("csr".to_owned(), b64(&csr.to_der()?));
 
-        let client = Client::new()?;
+        let client = Client::new();
         let jws = self.account.directory().jws(self.account.pkey(), map)?;
         let mut res = client
             .post(self.account
                       .directory()
                       .url_for("new-cert")
                       .ok_or("new-cert url not found")?)
-            .body(&jws[..])
+            .body(jws)
             .send()?;
 
-        if res.status() != &StatusCode::Created {
+        if res.status() != StatusCode::CREATED {
             let res_json = {
                 let mut res_content = String::new();
                 res.read_to_string(&mut res_content)?;
@@ -895,7 +895,7 @@ impl SignedCertificate {
     /// [`LETSENCRYPT_INTERMEDIATE_CERT_URL`](constant.LETSENCRYPT_INTERMEDIATE_CERT_URL.html).
     /// will be used if url is None.
     fn get_intermediate_certificate(&self, url: Option<&str>) -> Result<X509> {
-        let client = Client::new()?;
+        let client = Client::new();
         let mut res = client
             .get(url.unwrap_or(LETSENCRYPT_INTERMEDIATE_CERT_URL))
             .send()?;
@@ -1015,8 +1015,8 @@ impl<'a> Challenge<'a> {
             self.account.directory().jws(self.account.pkey(), map)?
         };
 
-        let client = Client::new()?;
-        let mut resp = client.post(&self.url).body(&payload[..]).send()?;
+        let client = Client::new();
+        let mut resp = client.post(&self.url).body(payload).send()?;
 
         let mut res_json: Value = {
             let mut res_content = String::new();
@@ -1024,7 +1024,7 @@ impl<'a> Challenge<'a> {
             from_str(&res_content)?
         };
 
-        if resp.status() != &StatusCode::Accepted {
+        if resp.status() != StatusCode::ACCEPTED {
             return Err(ErrorKind::AcmeServerError(res_json).into());
         }
 
